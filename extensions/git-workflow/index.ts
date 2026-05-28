@@ -130,6 +130,25 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("git-history-review", {
+		description: "Review recent commits and current diff for amend/squash/rework planning",
+		handler: async (_args, ctx) => {
+			const repo = await getGitSummary(pi);
+			if (!repo.inRepo) {
+				ctx.ui.notify("Not in a Git repository", "warning");
+				return;
+			}
+
+			const config = await loadOrCreateConfig(pi, ctx, repo);
+			if (config.mode === "disabled") {
+				ctx.ui.notify("pi-git-workflow is disabled for this repo", "warning");
+				return;
+			}
+
+			ctx.ui.notify(await buildHistoryReviewReport(pi, repo), "info");
+		},
+	});
+
 	pi.registerCommand("git-commit-ready", {
 		description: "Run pre-commit readiness checks and summarize current diff",
 		handler: async (_args, ctx) => {
@@ -537,6 +556,33 @@ function formatCheckResults(results: CheckResult[]): string {
 				.filter(Boolean)
 				.join("\n");
 		}),
+	].join("\n");
+}
+
+async function buildHistoryReviewReport(pi: ExtensionAPI, repo: Extract<GitSummary, { inRepo: true }>): Promise<string> {
+	const [recentCommits, nameStatus, stagedStat] = await Promise.all([
+		pi.exec("git", ["log", "--oneline", "--decorate", "-12"]),
+		pi.exec("git", ["diff", "--name-status"]),
+		pi.exec("git", ["diff", "--cached", "--stat"]),
+	]);
+
+	return [
+		"History review:",
+		`- Branch: ${repo.branch}`,
+		`- Dirty files: ${repo.changedFileCount}`,
+		"",
+		recentCommits.stdout.trim() ? `Recent commits:\n${indent(recentCommits.stdout.trim())}` : "Recent commits: none",
+		"",
+		repo.diffStat ? `Unstaged diff stat:\n${indent(repo.diffStat)}` : "Unstaged diff stat: none",
+		stagedStat.stdout.trim() ? `Staged diff stat:\n${indent(stagedStat.stdout.trim())}` : "Staged diff stat: none",
+		nameStatus.stdout.trim() ? `Changed paths:\n${indent(nameStatus.stdout.trim())}` : "Changed paths: none",
+		"",
+		"Cleanup guidance:",
+		"- If current changes are small fixes to the last commit, consider amend instead of a new commit.",
+		"- If recent commits share one logical purpose, consider squash/fixup before PR.",
+		"- If the current direction is wrong, identify the last clean commit and rework from there.",
+		"- Do not rewrite published history without explicit user confirmation and force-with-lease.",
+		"- This command only reviews. It does not run rebase, reset, amend, or push.",
 	].join("\n");
 }
 

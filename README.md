@@ -77,6 +77,7 @@ Commands such as hard reset, clean, force push, branch deletion, rebase, and squ
 - Provide commands for status, task ledger, checks, and commit preparation.
 - Run configured or inferred project checks with `/git-checks`.
 - Run pre-commit readiness review with `/git-commit-ready`.
+- Review history cleanup options with `/git-history-review`.
 - Keep issue and PR operations explicit.
 
 ## Repository modes
@@ -103,6 +104,12 @@ check
 ```
 
 The first failing command stops the sequence. When `taskLedger` is enabled, check output is written back to `docs/task.md`.
+
+## History review
+
+Use `/git-history-review` to inspect recent commits, staged/unstaged diff stats, and cleanup guidance. It helps decide whether to amend, squash, fixup, or rework from an earlier clean commit.
+
+The command is read-only. It does not run rebase, reset, amend, or push.
 
 ## Commit readiness
 

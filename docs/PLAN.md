@@ -201,11 +201,16 @@ Success criteria:
 
 ## Phase 6: History cleanup helpers
 
+Status: initial read-only implementation.
+
 Goal: support clean history without unsafe automation.
 
 Commands:
 
 - `/git-history-review`
+
+Planned later:
+
 - `/git-squash-plan`
 - `/git-amend-plan`
 - `/git-rework-from <commit>`
