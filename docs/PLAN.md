@@ -13,6 +13,8 @@ Deliverables:
 
 ## Phase 1: Safety guard MVP
 
+Status: initial implementation.
+
 Goal: prevent irreversible or high-risk Git operations from happening silently.
 
 Hooks:
@@ -40,6 +42,7 @@ Success criteria:
 - Dangerous commands are blocked or confirmed.
 - Normal read-only Git commands still run.
 - Normal test/lint commands are unaffected.
+- File mutation tools require confirmation on the default branch.
 
 ## Phase 2: Git context injection
 
