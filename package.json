@@ -1,0 +1,23 @@
+{
+  "name": "pi-git-workflow",
+  "version": "0.1.0",
+  "description": "Pi extension for safe Git workflow automation, context injection, task ledger, and commit/PR quality gates.",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "git",
+    "workflow",
+    "worktree"
+  ],
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/git-workflow/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
