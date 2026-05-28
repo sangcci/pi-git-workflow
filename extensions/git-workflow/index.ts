@@ -14,6 +14,7 @@ type GitWorkflowConfig = {
 	protectDefaultBranchWrites: boolean;
 	requireChecksBeforeCommit: boolean;
 	taskLedger: boolean;
+	checks: string[];
 };
 
 const DEFAULT_CONFIG: GitWorkflowConfig = {
@@ -22,6 +23,7 @@ const DEFAULT_CONFIG: GitWorkflowConfig = {
 	protectDefaultBranchWrites: false,
 	requireChecksBeforeCommit: false,
 	taskLedger: false,
+	checks: [],
 };
 
 export default function gitWorkflowExtension(pi: ExtensionAPI) {
@@ -103,6 +105,28 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 			const config = await loadOrCreateConfig(pi, ctx, repo);
 			const taskLedger = config.taskLedger ? await readTaskLedger(repo.root) : null;
 			ctx.ui.notify(buildGitWorkflowContext(repo, config, taskLedger), "info");
+		},
+	});
+
+	pi.registerCommand("git-checks", {
+		description: "Run configured or inferred project checks",
+		handler: async (_args, ctx) => {
+			const repo = await getGitSummary(pi);
+			if (!repo.inRepo) {
+				ctx.ui.notify("Not in a Git repository", "warning");
+				return;
+			}
+
+			const config = await loadOrCreateConfig(pi, ctx, repo);
+			if (config.mode === "disabled") {
+				ctx.ui.notify("pi-git-workflow is disabled for this repo", "warning");
+				return;
+			}
+
+			const results = await runChecks(pi, repo, config);
+			const report = formatCheckResults(results);
+			if (config.taskLedger) await appendChecksToTaskLedger(repo, report);
+			ctx.ui.notify(report, results.every((result) => result.code === 0) ? "info" : "error");
 		},
 	});
 
@@ -244,6 +268,7 @@ function configForMode(mode: WorkflowMode): GitWorkflowConfig {
 			protectDefaultBranchWrites: true,
 			requireChecksBeforeCommit: true,
 			taskLedger: true,
+			checks: [],
 		};
 	}
 
@@ -254,6 +279,7 @@ function configForMode(mode: WorkflowMode): GitWorkflowConfig {
 			protectDefaultBranchWrites: false,
 			requireChecksBeforeCommit: true,
 			taskLedger: true,
+			checks: [],
 		};
 	}
 
@@ -264,6 +290,7 @@ function configForMode(mode: WorkflowMode): GitWorkflowConfig {
 			protectDefaultBranchWrites: false,
 			requireChecksBeforeCommit: false,
 			taskLedger: false,
+			checks: [],
 		};
 	}
 
@@ -287,6 +314,7 @@ function normalizeConfig(value: unknown): GitWorkflowConfig {
 				? partial.requireChecksBeforeCommit
 				: base.requireChecksBeforeCommit,
 		taskLedger: typeof partial.taskLedger === "boolean" ? partial.taskLedger : base.taskLedger,
+		checks: Array.isArray(partial.checks) ? partial.checks.filter((item): item is string => typeof item === "string") : base.checks,
 	};
 }
 
@@ -362,6 +390,82 @@ async function markTaskLedgerDone(repo: Extract<GitSummary, { inRepo: true }>): 
 		? taskLedger.content.replace(/## Status[\s\S]*$/u, "## Status\n\nDone.\n")
 		: `${taskLedger.content.trim()}\n\n## Status\n\nDone.\n`;
 	await writeFile(join(repo.root, TASK_RELATIVE_PATH), next, "utf8");
+}
+
+async function appendChecksToTaskLedger(repo: Extract<GitSummary, { inRepo: true }>, report: string): Promise<void> {
+	const taskLedger = await readTaskLedger(repo.root);
+	if (!taskLedger.exists) return;
+
+	const checkSection = `## Checks\n\n${report}\n`;
+	const next = taskLedger.content.includes("## Checks")
+		? taskLedger.content.replace(/## Checks[\s\S]*?(?=\n## |$)/u, checkSection.trimEnd())
+		: `${taskLedger.content.trim()}\n\n${checkSection}`;
+	await writeFile(join(repo.root, TASK_RELATIVE_PATH), `${next.trim()}\n`, "utf8");
+}
+
+type CheckResult = {
+	command: string;
+	code: number;
+	stdout: string;
+	stderr: string;
+};
+
+async function runChecks(
+	pi: ExtensionAPI,
+	repo: Extract<GitSummary, { inRepo: true }>,
+	config: GitWorkflowConfig,
+): Promise<CheckResult[]> {
+	const commands = config.checks.length > 0 ? config.checks : await inferCheckCommands(repo.root);
+	if (commands.length === 0) {
+		return [{ command: "(none)", code: 0, stdout: "No configured or inferred checks.", stderr: "" }];
+	}
+
+	const results: CheckResult[] = [];
+	for (const command of commands) {
+		const result = await pi.exec("sh", ["-lc", command]);
+		results.push({ command, code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim() });
+		if (result.code !== 0) break;
+	}
+	return results;
+}
+
+async function inferCheckCommands(root: string): Promise<string[]> {
+	const packageJson = await readJsonFile(join(root, "package.json"));
+	const scripts = getPackageScripts(packageJson);
+	const commands: string[] = [];
+
+	for (const name of ["lint", "typecheck", "test", "format:check", "check"]) {
+		if (scripts[name]) commands.push(`npm run ${name}`);
+	}
+
+	return commands;
+}
+
+async function readJsonFile(path: string): Promise<unknown> {
+	try {
+		return JSON.parse(await readFile(path, "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+function getPackageScripts(value: unknown): Record<string, string> {
+	if (typeof value !== "object" || value === null) return {};
+	const scripts = (value as { scripts?: unknown }).scripts;
+	if (typeof scripts !== "object" || scripts === null) return {};
+	return scripts as Record<string, string>;
+}
+
+function formatCheckResults(results: CheckResult[]): string {
+	return [
+		"Check results:",
+		...results.map((result) => {
+			const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
+			return [`- ${result.code === 0 ? "PASS" : "FAIL"}: ${result.command}`, output ? indent(truncate(output, 1200)) : undefined]
+				.filter(Boolean)
+				.join("\n");
+		}),
+	].join("\n");
 }
 
 function buildGitWorkflowContext(

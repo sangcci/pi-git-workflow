@@ -136,6 +136,8 @@ Success criteria:
 
 ## Phase 4: Quality gates
 
+Status: initial implementation.
+
 Goal: force deterministic checks before commit or PR preparation.
 
 Config sources, in priority order:
@@ -155,13 +157,17 @@ Possible checks:
 Commands:
 
 - `/git-checks`
+
+Planned later:
+
 - `/git-commit-ready`
 
 Behavior:
 
-- Run configured checks.
-- Store latest check result in session state or task ledger.
-- Block commit-prep command if required checks fail.
+- Run configured checks from `.pi/git-workflow.json`.
+- Infer npm scripts when no checks are configured.
+- Store latest check result in task ledger when enabled.
+- Block commit-prep command if required checks fail later.
 
 Success criteria:
 

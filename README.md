@@ -75,6 +75,7 @@ Commands such as hard reset, clean, force push, branch deletion, rebase, and squ
 - Create and maintain `docs/task.md` in each workspace.
 - Provide `/git-task init`, `/git-task status`, and `/git-task done` commands.
 - Provide commands for status, task ledger, checks, and commit preparation.
+- Run configured or inferred project checks with `/git-checks`.
 - Keep issue and PR operations explicit.
 
 ## Repository modes
@@ -85,6 +86,22 @@ Commands such as hard reset, clean, force push, branch deletion, rebase, and squ
 - `branch`: prefer feature branches and worktrees. Protect the default branch from accidental file edits and commits. Good for shared repositories and PR-based work.
 - `observe`: inject Git context and keep destructive Git protection, but do not enforce task, check, or branch policy. Good when you want Git awareness without workflow management.
 - `disabled`: do nothing for this repository.
+
+## Checks
+
+Use `/git-checks` to run quality gates.
+
+If `.pi/git-workflow.json` contains `checks`, those shell commands run in order. If `checks` is empty, the extension infers npm scripts from `package.json` in this order when present:
+
+```text
+lint
+typecheck
+test
+format:check
+check
+```
+
+The first failing command stops the sequence. When `taskLedger` is enabled, check output is written back to `docs/task.md`.
 
 ## Task ledger
 

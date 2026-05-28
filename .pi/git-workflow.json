@@ -3,5 +3,6 @@
   "protectDestructiveGit": true,
   "protectDefaultBranchWrites": false,
   "requireChecksBeforeCommit": true,
-  "taskLedger": true
+  "taskLedger": true,
+  "checks": []
 }
