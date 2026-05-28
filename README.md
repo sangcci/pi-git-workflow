@@ -146,6 +146,28 @@ The ledger tracks current objective, scope, out-of-scope notes, changed files, c
 - Replacing project test/lint tools.
 - Forcing one global commit convention across all repositories.
 
+## Suggested workflow
+
+```text
+/git-task init <title>
+# code with pi
+/git-task update
+/git-checks
+/git-history-review
+/git-commit-ready
+/skill:git-commit
+/git-task done
+```
+
+Use issue and PR skills explicitly when needed:
+
+```text
+/skill:github-issue
+/skill:github-pr
+```
+
+The extension prepares context, checks, task state, and safety gates. Skills remain responsible for project-specific writing conventions and external GitHub text generation.
+
 ## Package usage
 
 During development:

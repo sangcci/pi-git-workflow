@@ -172,6 +172,8 @@ Success criteria:
 
 ## Phase 5: Skill orchestration
 
+Status: documented workflow handoff.
+
 Goal: reuse existing skills for text generation and conventions.
 
 Existing skills to integrate conceptually:
@@ -186,6 +188,7 @@ Behavior:
 - Extension commands prepare context and checks.
 - Skills generate branch names, commit messages, issue text, or PR text.
 - Issue/PR creation remains explicit.
+- README documents handoff to `git-commit`, `github-issue`, and `github-pr` skills.
 
 Commands to consider:
 
