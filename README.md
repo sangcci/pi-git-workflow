@@ -67,12 +67,23 @@ Commands such as hard reset, clean, force push, branch deletion, rebase, and squ
 ## Initial scope
 
 - Detect Git repository and current branch.
-- Protect default branches from direct coding work.
+- Ask each repository how Git should be managed.
+- Support `direct`, `branch`, `observe`, and `disabled` modes.
+- Protect default branches from direct coding work when branch mode is enabled.
 - Inject recent Git style context before agent work.
 - Block or confirm dangerous Git commands.
 - Create and maintain `docs/task.md` in each workspace.
 - Provide commands for status, task ledger, checks, and commit preparation.
 - Keep issue and PR operations explicit.
+
+## Repository modes
+
+`pi-git-workflow` stores per-repository configuration in `.pi/git-workflow.json`.
+
+- `direct`: allow work on the default branch while keeping destructive Git protection. Good for personal repositories, tools, notes, and dotfiles.
+- `branch`: prefer feature branches and worktrees. Protect the default branch from accidental file edits and commits. Good for shared repositories and PR-based work.
+- `observe`: inject Git context and keep destructive Git protection, but do not enforce task, check, or branch policy. Good when you want Git awareness without workflow management.
+- `disabled`: do nothing for this repository.
 
 ## Non-goals
 

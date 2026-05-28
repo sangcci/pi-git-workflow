@@ -13,7 +13,7 @@ Deliverables:
 
 ## Phase 1: Safety guard MVP
 
-Status: initial implementation.
+Status: initial implementation with per-repository modes.
 
 Goal: prevent irreversible or high-risk Git operations from happening silently.
 
@@ -32,8 +32,13 @@ Detect commands containing:
 
 Behavior:
 
-- Non-interactive mode: block high-risk commands by default.
-- Interactive mode: require explicit confirmation.
+- Store repo policy in `.pi/git-workflow.json`.
+- `direct`: allow default branch work, keep destructive Git confirmation.
+- `branch`: protect default branch writes and repository-mutating Git commands.
+- `observe`: inject context and keep destructive Git confirmation without workflow enforcement.
+- `disabled`: no integration for the repo.
+- Non-interactive mode: use observe defaults when no config exists.
+- Interactive mode: ask the user to choose repo mode on first run.
 - Show current branch and dirty summary before confirmation.
 - Never auto-approve history rewrite.
 

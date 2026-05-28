@@ -1,0 +1,7 @@
+{
+  "mode": "direct",
+  "protectDestructiveGit": true,
+  "protectDefaultBranchWrites": false,
+  "requireChecksBeforeCommit": true,
+  "taskLedger": true
+}
