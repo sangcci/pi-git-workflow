@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const EXTENSION_STATUS_KEY = "git-workflow";
 const CONFIG_RELATIVE_PATH = ".pi/git-workflow.json";
+const TASK_RELATIVE_PATH = "docs/task.md";
 
 type WorkflowMode = "direct" | "branch" | "observe" | "disabled";
 
@@ -47,9 +48,24 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 		const config = await loadOrCreateConfig(pi, ctx, repo);
 		if (config.mode === "disabled") return;
 
+		const taskLedger = config.taskLedger ? await readTaskLedger(repo.root) : null;
+
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n${buildGitWorkflowContext(repo, config)}`,
+			systemPrompt: `${event.systemPrompt}\n\n${buildGitWorkflowContext(repo, config, taskLedger)}`,
 		};
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		const repo = await getGitSummary(pi);
+		if (!repo.inRepo) return;
+
+		const config = await loadOrCreateConfig(pi, ctx, repo);
+		if (!config.taskLedger || config.mode === "disabled") return;
+
+		const taskLedger = await readTaskLedger(repo.root);
+		if (!taskLedger.exists && repo.dirty && ctx.hasUI) {
+			ctx.ui.notify(`Git changes detected without ${TASK_RELATIVE_PATH}. Run /git-task init <title>.`, "warning");
+		}
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -85,7 +101,46 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 			}
 
 			const config = await loadOrCreateConfig(pi, ctx, repo);
-			ctx.ui.notify(buildGitWorkflowContext(repo, config), "info");
+			const taskLedger = config.taskLedger ? await readTaskLedger(repo.root) : null;
+			ctx.ui.notify(buildGitWorkflowContext(repo, config, taskLedger), "info");
+		},
+	});
+
+	pi.registerCommand("git-task", {
+		description: "Manage docs/task.md task ledger: init, status, done",
+		getArgumentCompletions: (prefix) => {
+			return ["init", "status", "done"].filter((item) => item.startsWith(prefix)).map((value) => ({ value, label: value }));
+		},
+		handler: async (args, ctx) => {
+			const repo = await getGitSummary(pi);
+			if (!repo.inRepo) {
+				ctx.ui.notify("Not in a Git repository", "warning");
+				return;
+			}
+
+			const config = await loadOrCreateConfig(pi, ctx, repo);
+			if (config.mode === "disabled") {
+				ctx.ui.notify("pi-git-workflow is disabled for this repo", "warning");
+				return;
+			}
+
+			const [action = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			const title = rest.join(" ").trim();
+
+			if (action === "init") {
+				await createTaskLedger(repo, title || `Task on ${repo.branch}`);
+				ctx.ui.notify(`Created ${TASK_RELATIVE_PATH}`, "info");
+				return;
+			}
+
+			if (action === "done") {
+				await markTaskLedgerDone(repo);
+				ctx.ui.notify(`Marked ${TASK_RELATIVE_PATH} done`, "info");
+				return;
+			}
+
+			const taskLedger = await readTaskLedger(repo.root);
+			ctx.ui.notify(taskLedger.exists ? taskLedger.content : `${TASK_RELATIVE_PATH} does not exist. Run /git-task init <title>.`, "info");
 		},
 	});
 }
@@ -239,7 +294,81 @@ function isWorkflowMode(value: unknown): value is WorkflowMode {
 	return value === "direct" || value === "branch" || value === "observe" || value === "disabled";
 }
 
-function buildGitWorkflowContext(repo: Extract<GitSummary, { inRepo: true }>, config: GitWorkflowConfig): string {
+type TaskLedger =
+	| { exists: false }
+	| {
+			exists: true;
+			content: string;
+		};
+
+async function readTaskLedger(root: string): Promise<TaskLedger> {
+	try {
+		return { exists: true, content: await readFile(join(root, TASK_RELATIVE_PATH), "utf8") };
+	} catch {
+		return { exists: false };
+	}
+}
+
+async function createTaskLedger(repo: Extract<GitSummary, { inRepo: true }>, title: string): Promise<void> {
+	await mkdir(join(repo.root, "docs"), { recursive: true });
+	const content = [
+		"# Task",
+		"",
+		"## Current objective",
+		"",
+		title,
+		"",
+		"## Scope",
+		"",
+		"- ",
+		"",
+		"## Out of scope",
+		"",
+		"- ",
+		"",
+		"## Changed files",
+		"",
+		repo.statusShort ? indent(repo.statusShort) : "None yet.",
+		"",
+		"## Checks",
+		"",
+		"- Not run yet.",
+		"",
+		"## Commit plan",
+		"",
+		"- ",
+		"",
+		"## Open questions",
+		"",
+		"- ",
+		"",
+		"## Status",
+		"",
+		"In progress.",
+		"",
+	].join("\n");
+
+	await writeFile(join(repo.root, TASK_RELATIVE_PATH), content, "utf8");
+}
+
+async function markTaskLedgerDone(repo: Extract<GitSummary, { inRepo: true }>): Promise<void> {
+	const taskLedger = await readTaskLedger(repo.root);
+	if (!taskLedger.exists) {
+		await createTaskLedger(repo, `Task on ${repo.branch}`);
+		return markTaskLedgerDone(repo);
+	}
+
+	const next = taskLedger.content.includes("## Status")
+		? taskLedger.content.replace(/## Status[\s\S]*$/u, "## Status\n\nDone.\n")
+		: `${taskLedger.content.trim()}\n\n## Status\n\nDone.\n`;
+	await writeFile(join(repo.root, TASK_RELATIVE_PATH), next, "utf8");
+}
+
+function buildGitWorkflowContext(
+	repo: Extract<GitSummary, { inRepo: true }>,
+	config: GitWorkflowConfig,
+	taskLedger: TaskLedger | null,
+): string {
 	return [
 		"Pi Git Workflow context:",
 		`- Mode: ${config.mode}`,
@@ -257,9 +386,14 @@ function buildGitWorkflowContext(repo: Extract<GitSummary, { inRepo: true }>, co
 			? "- Before commit or PR preparation, run configured project checks."
 			: "- Checks are advisory unless the user asks for commit/PR preparation.",
 		config.taskLedger
-			? "- Use docs/task.md as a lightweight task ledger when doing scoped coding work."
+			? taskLedger?.exists
+				? `- Task ledger (${TASK_RELATIVE_PATH}) exists. Keep it current when scope, checks, or commit plan changes.`
+				: `- Task ledger enabled but ${TASK_RELATIVE_PATH} is missing. For scoped coding work, create it with /git-task init <title>.`
 			: "- Task ledger is not required in this repo mode.",
-	].join("\n");
+		taskLedger?.exists ? `- Current task ledger:\n${indent(truncate(taskLedger.content, 3000))}` : undefined,
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 function branchSafetyLine(repo: Extract<GitSummary, { inRepo: true }>, config: GitWorkflowConfig): string {
@@ -274,6 +408,11 @@ function indent(text: string): string {
 		.split("\n")
 		.map((line) => `  ${line}`)
 		.join("\n");
+}
+
+function truncate(text: string, maxLength: number): string {
+	if (text.length <= maxLength) return text;
+	return `${text.slice(0, maxLength)}\n... truncated ...`;
 }
 
 async function getDefaultBranch(pi: ExtensionAPI): Promise<string> {

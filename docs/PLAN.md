@@ -84,6 +84,8 @@ Success criteria:
 
 ## Phase 3: Task ledger
 
+Status: initial implementation.
+
 Goal: keep work scoped and prevent giant mixed diffs.
 
 File:
@@ -94,8 +96,11 @@ Commands:
 
 - `/git-task init [title]`
 - `/git-task status`
-- `/git-task update`
 - `/git-task done`
+
+Planned later:
+
+- `/git-task update`
 
 Suggested ledger sections:
 

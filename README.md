@@ -73,6 +73,7 @@ Commands such as hard reset, clean, force push, branch deletion, rebase, and squ
 - Inject recent Git style context before agent work.
 - Block or confirm dangerous Git commands.
 - Create and maintain `docs/task.md` in each workspace.
+- Provide `/git-task init`, `/git-task status`, and `/git-task done` commands.
 - Provide commands for status, task ledger, checks, and commit preparation.
 - Keep issue and PR operations explicit.
 
@@ -84,6 +85,20 @@ Commands such as hard reset, clean, force push, branch deletion, rebase, and squ
 - `branch`: prefer feature branches and worktrees. Protect the default branch from accidental file edits and commits. Good for shared repositories and PR-based work.
 - `observe`: inject Git context and keep destructive Git protection, but do not enforce task, check, or branch policy. Good when you want Git awareness without workflow management.
 - `disabled`: do nothing for this repository.
+
+## Task ledger
+
+When `taskLedger` is enabled, the extension uses `docs/task.md` as a lightweight workspace-local record.
+
+Commands:
+
+```bash
+/git-task init <title>
+/git-task status
+/git-task done
+```
+
+The ledger tracks current objective, scope, out-of-scope notes, changed files, checks, commit plan, open questions, and status. It is meant to help keep commit boundaries small and prevent long agent sessions from mixing unrelated work.
 
 ## Non-goals
 
