@@ -152,9 +152,9 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("git-task", {
-		description: "Manage docs/task.md task ledger: init, status, done",
+		description: "Manage docs/task.md task ledger: init, status, update, done",
 		getArgumentCompletions: (prefix) => {
-			return ["init", "status", "done"].filter((item) => item.startsWith(prefix)).map((value) => ({ value, label: value }));
+			return ["init", "status", "update", "done"].filter((item) => item.startsWith(prefix)).map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
 			const repo = await getGitSummary(pi);
@@ -175,6 +175,12 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 			if (action === "init") {
 				await createTaskLedger(repo, title || `Task on ${repo.branch}`);
 				ctx.ui.notify(`Created ${TASK_RELATIVE_PATH}`, "info");
+				return;
+			}
+
+			if (action === "update") {
+				await updateTaskLedger(repo);
+				ctx.ui.notify(`Updated ${TASK_RELATIVE_PATH}`, "info");
 				return;
 			}
 
@@ -398,6 +404,30 @@ async function createTaskLedger(repo: Extract<GitSummary, { inRepo: true }>, tit
 	].join("\n");
 
 	await writeFile(join(repo.root, TASK_RELATIVE_PATH), content, "utf8");
+}
+
+async function updateTaskLedger(repo: Extract<GitSummary, { inRepo: true }>): Promise<void> {
+	let taskLedger = await readTaskLedger(repo.root);
+	if (!taskLedger.exists) {
+		await createTaskLedger(repo, `Task on ${repo.branch}`);
+		taskLedger = await readTaskLedger(repo.root);
+	}
+	if (!taskLedger.exists) return;
+
+	const changedFiles = repo.statusShort ? repo.statusShort : "None.";
+	const commitPlan = repo.diffStat
+		? [
+				"Review these changes and group them into logical commits:",
+				"",
+				indent(repo.diffStat),
+				"",
+				"Prefer amend/squash for small follow-up fixes that belong to the same logical change.",
+			].join("\n")
+		: "No diff to commit.";
+
+	await replaceTaskSection(repo, taskLedger.content, "Changed files", changedFiles);
+	const refreshed = await readTaskLedger(repo.root);
+	await replaceTaskSection(repo, refreshed.exists ? refreshed.content : taskLedger.content, "Commit plan", commitPlan);
 }
 
 async function markTaskLedgerDone(repo: Extract<GitSummary, { inRepo: true }>): Promise<void> {

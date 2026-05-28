@@ -125,10 +125,11 @@ Commands:
 ```bash
 /git-task init <title>
 /git-task status
+/git-task update
 /git-task done
 ```
 
-The ledger tracks current objective, scope, out-of-scope notes, changed files, checks, commit plan, open questions, and status. It is meant to help keep commit boundaries small and prevent long agent sessions from mixing unrelated work.
+The ledger tracks current objective, scope, out-of-scope notes, changed files, checks, commit plan, open questions, and status. `/git-task update` refreshes changed files and commit plan from current Git status/diff. It is meant to help keep commit boundaries small and prevent long agent sessions from mixing unrelated work.
 
 ## Non-goals
 

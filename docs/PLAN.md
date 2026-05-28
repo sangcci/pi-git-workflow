@@ -96,11 +96,8 @@ Commands:
 
 - `/git-task init [title]`
 - `/git-task status`
-- `/git-task done`
-
-Planned later:
-
 - `/git-task update`
+- `/git-task done`
 
 Suggested ledger sections:
 
@@ -126,7 +123,8 @@ Behavior:
 
 - If coding starts without `docs/task.md`, notify or offer to create it.
 - At `agent_end`, summarize changed files and suggest ledger update.
-- Warn when diff touches many unrelated areas.
+- Refresh changed files and commit plan from Git status/diff.
+- Warn when diff touches many unrelated areas later.
 
 Success criteria:
 
