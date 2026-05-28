@@ -76,6 +76,7 @@ Commands such as hard reset, clean, force push, branch deletion, rebase, and squ
 - Provide `/git-task init`, `/git-task status`, and `/git-task done` commands.
 - Provide commands for status, task ledger, checks, and commit preparation.
 - Run configured or inferred project checks with `/git-checks`.
+- Run pre-commit readiness review with `/git-commit-ready`.
 - Keep issue and PR operations explicit.
 
 ## Repository modes
@@ -102,6 +103,18 @@ check
 ```
 
 The first failing command stops the sequence. When `taskLedger` is enabled, check output is written back to `docs/task.md`.
+
+## Commit readiness
+
+Use `/git-commit-ready` before drafting a commit. It checks:
+
+- working tree has changes
+- branch policy is satisfied
+- task ledger exists when required
+- configured checks pass when required
+- recent commit style and diff stat are visible
+
+The command does not create a commit. It prepares the workspace for the existing `git-commit` skill.
 
 ## Task ledger
 

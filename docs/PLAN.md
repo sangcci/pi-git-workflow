@@ -157,9 +157,6 @@ Possible checks:
 Commands:
 
 - `/git-checks`
-
-Planned later:
-
 - `/git-commit-ready`
 
 Behavior:
@@ -167,7 +164,7 @@ Behavior:
 - Run configured checks from `.pi/git-workflow.json`.
 - Infer npm scripts when no checks are configured.
 - Store latest check result in task ledger when enabled.
-- Block commit-prep command if required checks fail later.
+- Report commit readiness failures before the user runs commit generation.
 
 Success criteria:
 

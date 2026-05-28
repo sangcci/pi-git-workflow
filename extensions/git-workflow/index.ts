@@ -130,6 +130,27 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("git-commit-ready", {
+		description: "Run pre-commit readiness checks and summarize current diff",
+		handler: async (_args, ctx) => {
+			const repo = await getGitSummary(pi);
+			if (!repo.inRepo) {
+				ctx.ui.notify("Not in a Git repository", "warning");
+				return;
+			}
+
+			const config = await loadOrCreateConfig(pi, ctx, repo);
+			if (config.mode === "disabled") {
+				ctx.ui.notify("pi-git-workflow is disabled for this repo", "warning");
+				return;
+			}
+
+			const readiness = await buildCommitReadinessReport(pi, repo, config);
+			if (config.taskLedger) await appendCommitPlanToTaskLedger(repo, readiness);
+			ctx.ui.notify(readiness, readiness.includes("FAIL") ? "error" : "info");
+		},
+	});
+
 	pi.registerCommand("git-task", {
 		description: "Manage docs/task.md task ledger: init, status, done",
 		getArgumentCompletions: (prefix) => {
@@ -396,11 +417,32 @@ async function appendChecksToTaskLedger(repo: Extract<GitSummary, { inRepo: true
 	const taskLedger = await readTaskLedger(repo.root);
 	if (!taskLedger.exists) return;
 
-	const checkSection = `## Checks\n\n${report}\n`;
-	const next = taskLedger.content.includes("## Checks")
-		? taskLedger.content.replace(/## Checks[\s\S]*?(?=\n## |$)/u, checkSection.trimEnd())
-		: `${taskLedger.content.trim()}\n\n${checkSection}`;
+	await replaceTaskSection(repo, taskLedger.content, "Checks", report);
+}
+
+async function appendCommitPlanToTaskLedger(repo: Extract<GitSummary, { inRepo: true }>, report: string): Promise<void> {
+	const taskLedger = await readTaskLedger(repo.root);
+	if (!taskLedger.exists) return;
+
+	await replaceTaskSection(repo, taskLedger.content, "Commit plan", report);
+}
+
+async function replaceTaskSection(
+	repo: Extract<GitSummary, { inRepo: true }>,
+	content: string,
+	section: string,
+	body: string,
+): Promise<void> {
+	const sectionText = `## ${section}\n\n${body}\n`;
+	const pattern = new RegExp(`## ${escapeRegExp(section)}[\\s\\S]*?(?=\\n## |$)`, "u");
+	const next = content.includes(`## ${section}`)
+		? content.replace(pattern, sectionText.trimEnd())
+		: `${content.trim()}\n\n${sectionText}`;
 	await writeFile(join(repo.root, TASK_RELATIVE_PATH), `${next.trim()}\n`, "utf8");
+}
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 type CheckResult = {
@@ -466,6 +508,40 @@ function formatCheckResults(results: CheckResult[]): string {
 				.join("\n");
 		}),
 	].join("\n");
+}
+
+async function buildCommitReadinessReport(
+	pi: ExtensionAPI,
+	repo: Extract<GitSummary, { inRepo: true }>,
+	config: GitWorkflowConfig,
+): Promise<string> {
+	const taskLedger = config.taskLedger ? await readTaskLedger(repo.root) : null;
+	const checks = config.requireChecksBeforeCommit ? await runChecks(pi, repo, config) : [];
+	const checksPassed = checks.every((result) => result.code === 0);
+	const hasChanges = repo.changedFileCount > 0;
+	const taskOk = !config.taskLedger || taskLedger?.exists === true;
+	const branchOk = !(config.mode === "branch" && config.protectDefaultBranchWrites && repo.onDefaultBranch);
+
+	return [
+		"Commit readiness:",
+		`- ${hasChanges ? "PASS" : "FAIL"}: working tree has changes to commit`,
+		`- ${branchOk ? "PASS" : "FAIL"}: branch policy (${config.mode}, current: ${repo.branch})`,
+		`- ${taskOk ? "PASS" : "FAIL"}: task ledger ${config.taskLedger ? TASK_RELATIVE_PATH : "not required"}`,
+		config.requireChecksBeforeCommit ? `- ${checksPassed ? "PASS" : "FAIL"}: required checks` : "- PASS: checks not required by config",
+		"",
+		repo.statusShort ? `Status:\n${indent(repo.statusShort)}` : "Status: clean",
+		repo.diffStat ? `Diff stat:\n${indent(repo.diffStat)}` : "Diff stat: none",
+		"",
+		repo.recentCommits ? `Recent commit style:\n${indent(repo.recentCommits)}` : "Recent commit style: none",
+		checks.length > 0 ? `\n${formatCheckResults(checks)}` : undefined,
+		"",
+		"Next step:",
+		checksPassed && hasChanges && taskOk && branchOk
+			? "- Ready to draft commit message with git-commit skill. Keep commit scope logical; amend/squash related small fixes."
+			: "- Not ready. Fix FAIL items before drafting commit.",
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 function buildGitWorkflowContext(
