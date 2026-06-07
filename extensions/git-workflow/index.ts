@@ -1,32 +1,33 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CONFIG_RELATIVE_PATH, DEFAULT_CONFIG, configForMode, loadConfig, parseModeSelection, saveConfig } from "../../src/config.js";
+import { runChecks, runCommitlintDraft } from "../../src/checks.js";
+import { dirtyFingerprint, getGitSummary } from "../../src/git.js";
+import { confirmOrBlockRisk, detectRiskyGitCommand, shouldGuardDefaultBranchFileMutation } from "../../src/guards.js";
+import {
+	TASK_RELATIVE_PATH,
+	appendChecksToTaskLedger,
+	appendCommitPlanToTaskLedger,
+	createTaskLedger,
+	markTaskLedgerDone,
+	readTaskLedger,
+	updateTaskLedger,
+} from "../../src/ledger.js";
+import {
+	buildCommitReadinessReport,
+	buildGitWorkflowContext,
+	buildHistoryReviewReport,
+	formatCheckResults,
+	indent,
+} from "../../src/reports.js";
+import type { GitSummary, GitWorkflowConfig } from "../../src/types.js";
 
 const EXTENSION_STATUS_KEY = "git-workflow";
-const CONFIG_RELATIVE_PATH = ".pi/git-workflow.json";
-const TASK_RELATIVE_PATH = "docs/task.md";
 
-type WorkflowMode = "direct" | "branch" | "observe" | "disabled";
-
-type GitWorkflowConfig = {
-	mode: WorkflowMode;
-	protectDestructiveGit: boolean;
-	protectDefaultBranchWrites: boolean;
-	requireChecksBeforeCommit: boolean;
-	taskLedger: boolean;
-	checks: string[];
-};
-
-const DEFAULT_CONFIG: GitWorkflowConfig = {
-	mode: "observe",
-	protectDestructiveGit: true,
-	protectDefaultBranchWrites: false,
-	requireChecksBeforeCommit: false,
-	taskLedger: false,
-	checks: [],
-};
 
 export default function gitWorkflowExtension(pi: ExtensionAPI) {
+	let handledDirtyFingerprint: string | undefined;
+	let ignoredDirtyFingerprint: string | undefined;
+
 	pi.on("session_start", async (_event, ctx) => {
 		const repo = await getGitSummary(pi);
 		if (!repo.inRepo) {
@@ -67,6 +68,53 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 		const taskLedger = await readTaskLedger(repo.root);
 		if (!taskLedger.exists && repo.dirty && ctx.hasUI) {
 			ctx.ui.notify(`Git changes detected without ${TASK_RELATIVE_PATH}. Run /git-task init <title>.`, "warning");
+		}
+
+		if (!repo.dirty || !ctx.hasUI) return;
+		const fingerprint = dirtyFingerprint(repo);
+		if (fingerprint === handledDirtyFingerprint || fingerprint === ignoredDirtyFingerprint) return;
+
+		const choice = await ctx.ui.select("Git changes detected after agent work", [
+			"Record task state only",
+			"Run checks",
+			"Prepare commit",
+			"Review history cleanup",
+			"Continue coding",
+			"Ignore for now",
+		]);
+
+		if (choice === "Record task state only") {
+			await updateTaskLedger(repo);
+			handledDirtyFingerprint = fingerprint;
+			ctx.ui.notify(`Recorded Git task state in ${TASK_RELATIVE_PATH}`, "info");
+			return;
+		}
+
+		if (choice === "Run checks") {
+			const results = await runChecks(pi, repo, config);
+			const report = formatCheckResults(results);
+			await appendChecksToTaskLedger(repo, report);
+			handledDirtyFingerprint = fingerprint;
+			ctx.ui.notify(report, results.every((result) => result.code === 0) ? "info" : "error");
+			return;
+		}
+
+		if (choice === "Prepare commit") {
+			const readiness = await buildCommitReadinessReport(pi, repo, config);
+			await appendCommitPlanToTaskLedger(repo, readiness);
+			handledDirtyFingerprint = fingerprint;
+			ctx.ui.notify(readiness, readiness.includes("FAIL") ? "warning" : "info");
+			return;
+		}
+
+		if (choice === "Review history cleanup") {
+			ctx.ui.notify(await buildHistoryReviewReport(pi, repo), "info");
+			handledDirtyFingerprint = fingerprint;
+			return;
+		}
+
+		if (choice === "Ignore for now") {
+			ignoredDirtyFingerprint = fingerprint;
 		}
 	});
 
@@ -166,12 +214,70 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 
 			const readiness = await buildCommitReadinessReport(pi, repo, config);
 			if (config.taskLedger) await appendCommitPlanToTaskLedger(repo, readiness);
-			ctx.ui.notify(readiness, readiness.includes("FAIL") ? "error" : "info");
+			ctx.ui.notify(readiness, readiness.includes("FAIL") ? "warning" : "info");
+		},
+	});
+
+	pi.registerCommand("git-branch-start", {
+		description: "Prepare branch context for a configured branch naming skill",
+		handler: async (_args, ctx) => {
+			const repo = await getGitSummary(pi);
+			if (!repo.inRepo) {
+				ctx.ui.notify("Not in a Git repository", "warning");
+				return;
+			}
+			ctx.ui.notify([
+				"Branch handoff context:",
+				`- Current branch: ${repo.branch}`,
+				`- Default branch: ${repo.defaultBranch}`,
+				"- Suggested next step: run the configured branch naming skill, e.g. /skill:git-branch.",
+				"- Do not create or switch branches without explicit user confirmation.",
+			].join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("git-pr-draft", {
+		description: "Prepare PR context for a configured PR skill",
+		handler: async (_args, ctx) => {
+			const repo = await getGitSummary(pi);
+			if (!repo.inRepo) {
+				ctx.ui.notify("Not in a Git repository", "warning");
+				return;
+			}
+			ctx.ui.notify([
+				"PR handoff context:",
+				`- Branch: ${repo.branch}`,
+				repo.statusShort ? `Status:\n${indent(repo.statusShort)}` : "Status: clean",
+				repo.diffStat ? `Diff stat:\n${indent(repo.diffStat)}` : "Diff stat: none",
+				"- Suggested next step: run the configured PR skill, e.g. /skill:github-pr.",
+				"- Do not create PRs without explicit user confirmation.",
+			].join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("git-commitlint-draft", {
+		description: "Validate a draft commit message with configured commitlint script",
+		handler: async (args, ctx) => {
+			const repo = await getGitSummary(pi);
+			if (!repo.inRepo) {
+				ctx.ui.notify("Not in a Git repository", "warning");
+				return;
+			}
+
+			const message = args.trim();
+			if (!message) {
+				ctx.ui.notify("Usage: /git-commitlint-draft <commit message>", "warning");
+				return;
+			}
+
+			const result = await runCommitlintDraft(pi, repo.root, message);
+			const report = formatCheckResults([result]);
+			ctx.ui.notify(report, result.code === 0 ? "info" : "error");
 		},
 	});
 
 	pi.registerCommand("git-task", {
-		description: "Manage docs/task.md task ledger: init, status, update, done",
+		description: "Manage .pi/moonpi/git-task.md task ledger: init, status, update, done",
 		getArgumentCompletions: (prefix) => {
 			return ["init", "status", "update", "done"].filter((item) => item.startsWith(prefix)).map((value) => ({ value, label: value }));
 		},
@@ -215,53 +321,6 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 	});
 }
 
-type ToolCallContext = ExtensionContext;
-
-type GitSummary =
-	| { inRepo: false }
-	| {
-			inRepo: true;
-			root: string;
-			branch: string;
-			defaultBranch: string;
-			onDefaultBranch: boolean;
-			dirty: boolean;
-			changedFileCount: number;
-			statusShort: string;
-			diffStat: string;
-			recentCommits: string;
-		};
-
-async function getGitSummary(pi: ExtensionAPI): Promise<GitSummary> {
-	const root = await pi.exec("git", ["rev-parse", "--show-toplevel"]);
-	if (root.code !== 0) return { inRepo: false };
-
-	const [branch, defaultBranch, status, diffStat, recentCommits] = await Promise.all([
-		pi.exec("git", ["branch", "--show-current"]),
-		getDefaultBranch(pi),
-		pi.exec("git", ["status", "--short"]),
-		pi.exec("git", ["diff", "--stat"]),
-		pi.exec("git", ["log", "--oneline", "-10"]),
-	]);
-
-	const currentBranch = branch.stdout.trim() || "(detached)";
-	const statusShort = status.stdout.trim();
-	const changedFileCount = statusShort ? statusShort.split("\n").filter(Boolean).length : 0;
-
-	return {
-		inRepo: true,
-		root: root.stdout.trim(),
-		branch: currentBranch,
-		defaultBranch,
-		onDefaultBranch: currentBranch === defaultBranch,
-		dirty: changedFileCount > 0,
-		changedFileCount,
-		statusShort,
-		diffStat: diffStat.stdout.trim(),
-		recentCommits: recentCommits.stdout.trim(),
-	};
-}
-
 async function loadOrCreateConfig(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
@@ -283,498 +342,4 @@ async function loadOrCreateConfig(
 	await saveConfig(repo.root, config);
 	ctx.ui.notify(`Saved ${CONFIG_RELATIVE_PATH} with mode: ${config.mode}`, "info");
 	return config;
-}
-
-async function loadConfig(root: string): Promise<GitWorkflowConfig | null> {
-	try {
-		const raw = await readFile(join(root, CONFIG_RELATIVE_PATH), "utf8");
-		return normalizeConfig(JSON.parse(raw));
-	} catch {
-		return null;
-	}
-}
-
-async function saveConfig(root: string, config: GitWorkflowConfig): Promise<void> {
-	await mkdir(join(root, ".pi"), { recursive: true });
-	await writeFile(join(root, CONFIG_RELATIVE_PATH), `${JSON.stringify(config, null, 2)}\n`, "utf8");
-}
-
-function parseModeSelection(selection: string): WorkflowMode {
-	if (selection.startsWith("direct")) return "direct";
-	if (selection.startsWith("branch")) return "branch";
-	if (selection.startsWith("disabled")) return "disabled";
-	return "observe";
-}
-
-function configForMode(mode: WorkflowMode): GitWorkflowConfig {
-	if (mode === "branch") {
-		return {
-			mode,
-			protectDestructiveGit: true,
-			protectDefaultBranchWrites: true,
-			requireChecksBeforeCommit: true,
-			taskLedger: true,
-			checks: [],
-		};
-	}
-
-	if (mode === "direct") {
-		return {
-			mode,
-			protectDestructiveGit: true,
-			protectDefaultBranchWrites: false,
-			requireChecksBeforeCommit: true,
-			taskLedger: true,
-			checks: [],
-		};
-	}
-
-	if (mode === "disabled") {
-		return {
-			mode,
-			protectDestructiveGit: false,
-			protectDefaultBranchWrites: false,
-			requireChecksBeforeCommit: false,
-			taskLedger: false,
-			checks: [],
-		};
-	}
-
-	return DEFAULT_CONFIG;
-}
-
-function normalizeConfig(value: unknown): GitWorkflowConfig {
-	const partial = typeof value === "object" && value !== null ? (value as Partial<GitWorkflowConfig>) : {};
-	const mode = isWorkflowMode(partial.mode) ? partial.mode : DEFAULT_CONFIG.mode;
-	const base = configForMode(mode);
-
-	return {
-		mode,
-		protectDestructiveGit: typeof partial.protectDestructiveGit === "boolean" ? partial.protectDestructiveGit : base.protectDestructiveGit,
-		protectDefaultBranchWrites:
-			typeof partial.protectDefaultBranchWrites === "boolean"
-				? partial.protectDefaultBranchWrites
-				: base.protectDefaultBranchWrites,
-		requireChecksBeforeCommit:
-			typeof partial.requireChecksBeforeCommit === "boolean"
-				? partial.requireChecksBeforeCommit
-				: base.requireChecksBeforeCommit,
-		taskLedger: typeof partial.taskLedger === "boolean" ? partial.taskLedger : base.taskLedger,
-		checks: Array.isArray(partial.checks) ? partial.checks.filter((item): item is string => typeof item === "string") : base.checks,
-	};
-}
-
-function isWorkflowMode(value: unknown): value is WorkflowMode {
-	return value === "direct" || value === "branch" || value === "observe" || value === "disabled";
-}
-
-type TaskLedger =
-	| { exists: false }
-	| {
-			exists: true;
-			content: string;
-		};
-
-async function readTaskLedger(root: string): Promise<TaskLedger> {
-	try {
-		return { exists: true, content: await readFile(join(root, TASK_RELATIVE_PATH), "utf8") };
-	} catch {
-		return { exists: false };
-	}
-}
-
-async function createTaskLedger(repo: Extract<GitSummary, { inRepo: true }>, title: string): Promise<void> {
-	await mkdir(join(repo.root, "docs"), { recursive: true });
-	const content = [
-		"# Task",
-		"",
-		"## Current objective",
-		"",
-		title,
-		"",
-		"## Scope",
-		"",
-		"- ",
-		"",
-		"## Out of scope",
-		"",
-		"- ",
-		"",
-		"## Changed files",
-		"",
-		repo.statusShort ? indent(repo.statusShort) : "None yet.",
-		"",
-		"## Checks",
-		"",
-		"- Not run yet.",
-		"",
-		"## Commit plan",
-		"",
-		"- ",
-		"",
-		"## Open questions",
-		"",
-		"- ",
-		"",
-		"## Status",
-		"",
-		"In progress.",
-		"",
-	].join("\n");
-
-	await writeFile(join(repo.root, TASK_RELATIVE_PATH), content, "utf8");
-}
-
-async function updateTaskLedger(repo: Extract<GitSummary, { inRepo: true }>): Promise<void> {
-	let taskLedger = await readTaskLedger(repo.root);
-	if (!taskLedger.exists) {
-		await createTaskLedger(repo, `Task on ${repo.branch}`);
-		taskLedger = await readTaskLedger(repo.root);
-	}
-	if (!taskLedger.exists) return;
-
-	const changedFiles = repo.statusShort ? repo.statusShort : "None.";
-	const commitPlan = repo.diffStat
-		? [
-				"Review these changes and group them into logical commits:",
-				"",
-				indent(repo.diffStat),
-				"",
-				"Prefer amend/squash for small follow-up fixes that belong to the same logical change.",
-			].join("\n")
-		: "No diff to commit.";
-
-	await replaceTaskSection(repo, taskLedger.content, "Changed files", changedFiles);
-	const refreshed = await readTaskLedger(repo.root);
-	await replaceTaskSection(repo, refreshed.exists ? refreshed.content : taskLedger.content, "Commit plan", commitPlan);
-}
-
-async function markTaskLedgerDone(repo: Extract<GitSummary, { inRepo: true }>): Promise<void> {
-	const taskLedger = await readTaskLedger(repo.root);
-	if (!taskLedger.exists) {
-		await createTaskLedger(repo, `Task on ${repo.branch}`);
-		return markTaskLedgerDone(repo);
-	}
-
-	const next = taskLedger.content.includes("## Status")
-		? taskLedger.content.replace(/## Status[\s\S]*$/u, "## Status\n\nDone.\n")
-		: `${taskLedger.content.trim()}\n\n## Status\n\nDone.\n`;
-	await writeFile(join(repo.root, TASK_RELATIVE_PATH), next, "utf8");
-}
-
-async function appendChecksToTaskLedger(repo: Extract<GitSummary, { inRepo: true }>, report: string): Promise<void> {
-	const taskLedger = await readTaskLedger(repo.root);
-	if (!taskLedger.exists) return;
-
-	await replaceTaskSection(repo, taskLedger.content, "Checks", report);
-}
-
-async function appendCommitPlanToTaskLedger(repo: Extract<GitSummary, { inRepo: true }>, report: string): Promise<void> {
-	const taskLedger = await readTaskLedger(repo.root);
-	if (!taskLedger.exists) return;
-
-	await replaceTaskSection(repo, taskLedger.content, "Commit plan", report);
-}
-
-async function replaceTaskSection(
-	repo: Extract<GitSummary, { inRepo: true }>,
-	content: string,
-	section: string,
-	body: string,
-): Promise<void> {
-	const sectionText = `## ${section}\n\n${body}\n`;
-	const pattern = new RegExp(`## ${escapeRegExp(section)}[\\s\\S]*?(?=\\n## |$)`, "u");
-	const next = content.includes(`## ${section}`)
-		? content.replace(pattern, sectionText.trimEnd())
-		: `${content.trim()}\n\n${sectionText}`;
-	await writeFile(join(repo.root, TASK_RELATIVE_PATH), `${next.trim()}\n`, "utf8");
-}
-
-function escapeRegExp(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-type CheckResult = {
-	command: string;
-	code: number;
-	stdout: string;
-	stderr: string;
-};
-
-async function runChecks(
-	pi: ExtensionAPI,
-	repo: Extract<GitSummary, { inRepo: true }>,
-	config: GitWorkflowConfig,
-): Promise<CheckResult[]> {
-	const commands = config.checks.length > 0 ? config.checks : await inferCheckCommands(repo.root);
-	if (commands.length === 0) {
-		return [{ command: "(none)", code: 0, stdout: "No configured or inferred checks.", stderr: "" }];
-	}
-
-	const results: CheckResult[] = [];
-	for (const command of commands) {
-		const result = await pi.exec("sh", ["-lc", command]);
-		results.push({ command, code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim() });
-		if (result.code !== 0) break;
-	}
-	return results;
-}
-
-async function inferCheckCommands(root: string): Promise<string[]> {
-	const packageJson = await readJsonFile(join(root, "package.json"));
-	const scripts = getPackageScripts(packageJson);
-	const commands: string[] = [];
-
-	for (const name of ["lint", "typecheck", "test", "format:check", "check"]) {
-		if (scripts[name]) commands.push(`npm run ${name}`);
-	}
-
-	return commands;
-}
-
-async function readJsonFile(path: string): Promise<unknown> {
-	try {
-		return JSON.parse(await readFile(path, "utf8"));
-	} catch {
-		return null;
-	}
-}
-
-function getPackageScripts(value: unknown): Record<string, string> {
-	if (typeof value !== "object" || value === null) return {};
-	const scripts = (value as { scripts?: unknown }).scripts;
-	if (typeof scripts !== "object" || scripts === null) return {};
-	return scripts as Record<string, string>;
-}
-
-function formatCheckResults(results: CheckResult[]): string {
-	return [
-		"Check results:",
-		...results.map((result) => {
-			const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
-			return [`- ${result.code === 0 ? "PASS" : "FAIL"}: ${result.command}`, output ? indent(truncate(output, 1200)) : undefined]
-				.filter(Boolean)
-				.join("\n");
-		}),
-	].join("\n");
-}
-
-async function buildHistoryReviewReport(pi: ExtensionAPI, repo: Extract<GitSummary, { inRepo: true }>): Promise<string> {
-	const [recentCommits, nameStatus, stagedStat] = await Promise.all([
-		pi.exec("git", ["log", "--oneline", "--decorate", "-12"]),
-		pi.exec("git", ["diff", "--name-status"]),
-		pi.exec("git", ["diff", "--cached", "--stat"]),
-	]);
-
-	return [
-		"History review:",
-		`- Branch: ${repo.branch}`,
-		`- Dirty files: ${repo.changedFileCount}`,
-		"",
-		recentCommits.stdout.trim() ? `Recent commits:\n${indent(recentCommits.stdout.trim())}` : "Recent commits: none",
-		"",
-		repo.diffStat ? `Unstaged diff stat:\n${indent(repo.diffStat)}` : "Unstaged diff stat: none",
-		stagedStat.stdout.trim() ? `Staged diff stat:\n${indent(stagedStat.stdout.trim())}` : "Staged diff stat: none",
-		nameStatus.stdout.trim() ? `Changed paths:\n${indent(nameStatus.stdout.trim())}` : "Changed paths: none",
-		"",
-		"Cleanup guidance:",
-		"- If current changes are small fixes to the last commit, consider amend instead of a new commit.",
-		"- If recent commits share one logical purpose, consider squash/fixup before PR.",
-		"- If the current direction is wrong, identify the last clean commit and rework from there.",
-		"- Do not rewrite published history without explicit user confirmation and force-with-lease.",
-		"- This command only reviews. It does not run rebase, reset, amend, or push.",
-	].join("\n");
-}
-
-async function buildCommitReadinessReport(
-	pi: ExtensionAPI,
-	repo: Extract<GitSummary, { inRepo: true }>,
-	config: GitWorkflowConfig,
-): Promise<string> {
-	const taskLedger = config.taskLedger ? await readTaskLedger(repo.root) : null;
-	const checks = config.requireChecksBeforeCommit ? await runChecks(pi, repo, config) : [];
-	const checksPassed = checks.every((result) => result.code === 0);
-	const hasChanges = repo.changedFileCount > 0;
-	const taskOk = !config.taskLedger || taskLedger?.exists === true;
-	const branchOk = !(config.mode === "branch" && config.protectDefaultBranchWrites && repo.onDefaultBranch);
-
-	return [
-		"Commit readiness:",
-		`- ${hasChanges ? "PASS" : "FAIL"}: working tree has changes to commit`,
-		`- ${branchOk ? "PASS" : "FAIL"}: branch policy (${config.mode}, current: ${repo.branch})`,
-		`- ${taskOk ? "PASS" : "FAIL"}: task ledger ${config.taskLedger ? TASK_RELATIVE_PATH : "not required"}`,
-		config.requireChecksBeforeCommit ? `- ${checksPassed ? "PASS" : "FAIL"}: required checks` : "- PASS: checks not required by config",
-		"",
-		repo.statusShort ? `Status:\n${indent(repo.statusShort)}` : "Status: clean",
-		repo.diffStat ? `Diff stat:\n${indent(repo.diffStat)}` : "Diff stat: none",
-		"",
-		repo.recentCommits ? `Recent commit style:\n${indent(repo.recentCommits)}` : "Recent commit style: none",
-		checks.length > 0 ? `\n${formatCheckResults(checks)}` : undefined,
-		"",
-		"Next step:",
-		checksPassed && hasChanges && taskOk && branchOk
-			? "- Ready to draft commit message with git-commit skill. Keep commit scope logical; amend/squash related small fixes."
-			: "- Not ready. Fix FAIL items before drafting commit.",
-	]
-		.filter(Boolean)
-		.join("\n");
-}
-
-function buildGitWorkflowContext(
-	repo: Extract<GitSummary, { inRepo: true }>,
-	config: GitWorkflowConfig,
-	taskLedger: TaskLedger | null,
-): string {
-	return [
-		"Pi Git Workflow context:",
-		`- Mode: ${config.mode}`,
-		`- Current branch: ${repo.branch}`,
-		`- Default branch: ${repo.defaultBranch}`,
-		branchSafetyLine(repo, config),
-		`- Dirty files: ${repo.changedFileCount}`,
-		repo.statusShort ? `- Status:\n${indent(repo.statusShort)}` : "- Status: clean",
-		repo.diffStat ? `- Diff stat:\n${indent(repo.diffStat)}` : "- Diff stat: none",
-		repo.recentCommits ? `- Recent commits:\n${indent(repo.recentCommits)}` : "- Recent commits: none",
-		"- Match recent commit message style when drafting commits.",
-		"- Keep commit scope small and logical; suggest amend/squash for related small follow-up fixes.",
-		"- Do not create, close, or mutate GitHub issues automatically.",
-		config.requireChecksBeforeCommit
-			? "- Before commit or PR preparation, run configured project checks."
-			: "- Checks are advisory unless the user asks for commit/PR preparation.",
-		config.taskLedger
-			? taskLedger?.exists
-				? `- Task ledger (${TASK_RELATIVE_PATH}) exists. Keep it current when scope, checks, or commit plan changes.`
-				: `- Task ledger enabled but ${TASK_RELATIVE_PATH} is missing. For scoped coding work, create it with /git-task init <title>.`
-			: "- Task ledger is not required in this repo mode.",
-		taskLedger?.exists ? `- Current task ledger:\n${indent(truncate(taskLedger.content, 3000))}` : undefined,
-	]
-		.filter(Boolean)
-		.join("\n");
-}
-
-function branchSafetyLine(repo: Extract<GitSummary, { inRepo: true }>, config: GitWorkflowConfig): string {
-	if (!repo.onDefaultBranch) return "- Branch safety: not on default branch.";
-	if (config.mode === "branch") return "- Warning: branch mode protects the default branch; use a feature branch/worktree.";
-	if (config.mode === "direct") return "- Branch safety: direct mode allows work on the default branch.";
-	return "- Branch safety: observe mode does not enforce branch policy.";
-}
-
-function indent(text: string): string {
-	return text
-		.split("\n")
-		.map((line) => `  ${line}`)
-		.join("\n");
-}
-
-function truncate(text: string, maxLength: number): string {
-	if (text.length <= maxLength) return text;
-	return `${text.slice(0, maxLength)}\n... truncated ...`;
-}
-
-async function getDefaultBranch(pi: ExtensionAPI): Promise<string> {
-	const symbolicRef = await pi.exec("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"]);
-	const remoteHead = symbolicRef.stdout.trim();
-	if (symbolicRef.code === 0 && remoteHead.startsWith("origin/")) {
-		return remoteHead.slice("origin/".length);
-	}
-
-	for (const candidate of ["main", "master", "develop"]) {
-		const exists = await pi.exec("git", ["show-ref", "--verify", "--quiet", `refs/heads/${candidate}`]);
-		if (exists.code === 0) return candidate;
-	}
-
-	return "main";
-}
-
-type RiskyCommand = {
-	reason: string;
-	policy: "confirm" | "block";
-};
-
-async function confirmOrBlockRisk(
-	ctx: ToolCallContext,
-	repo: GitSummary,
-	config: GitWorkflowConfig,
-	risk: RiskyCommand,
-) {
-	const message = [
-		`Risky Git operation detected: ${risk.reason}`,
-		repo.inRepo ? `Mode: ${config.mode}` : undefined,
-		repo.inRepo ? `Branch: ${repo.branch}` : "Not in a Git repository",
-		repo.inRepo ? `Default branch: ${repo.defaultBranch}` : undefined,
-		repo.inRepo ? `Dirty files: ${repo.changedFileCount}` : undefined,
-		risk.policy === "block" ? "This operation is blocked by policy." : "Allow this operation?",
-	]
-		.filter(Boolean)
-		.join("\n");
-
-	if (risk.policy === "block") {
-		return { block: true, reason: message };
-	}
-
-	if (!ctx.hasUI) {
-		return { block: true, reason: `Blocked risky Git operation in non-interactive mode: ${risk.reason}` };
-	}
-
-	const allowed = await ctx.ui.confirm("Risky Git operation", message);
-	if (!allowed) {
-		return { block: true, reason: `Blocked risky Git operation: ${risk.reason}` };
-	}
-}
-
-function shouldGuardDefaultBranchFileMutation(config: GitWorkflowConfig, repo: GitSummary, toolName: string): boolean {
-	return (
-		config.mode === "branch" &&
-		config.protectDefaultBranchWrites &&
-		repo.inRepo &&
-		repo.onDefaultBranch &&
-		isFileMutationTool(toolName)
-	);
-}
-
-function isFileMutationTool(toolName: string): boolean {
-	return toolName === "write" || toolName === "edit";
-}
-
-function detectRiskyGitCommand(command: string, repo: GitSummary, config: GitWorkflowConfig): RiskyCommand | null {
-	const normalized = command.replace(/\\\n/g, " ").replace(/\s+/g, " ").trim();
-
-	if (config.protectDestructiveGit) {
-		const confirmChecks: Array<[RegExp, string]> = [
-			[/\bgit\s+reset\s+--hard\b/, "git reset --hard"],
-			[/\bgit\s+reset\b[^;&|]*\bHEAD~\d+\b/, "git reset to previous commit"],
-			[/\bgit\s+clean\s+[^;&|]*\-[^;&|]*[fxd]/, "git clean with force/delete flags"],
-			[/\bgit\s+push\b[^;&|]*(--force|-f|--force-with-lease)\b/, "git push force"],
-			[/\bgit\s+branch\s+-(d|D)\b/, "git branch delete"],
-			[/\bgit\s+rebase\b/, "git rebase/history rewrite"],
-			[/\bgit\s+commit\b[^;&|]*\s+--amend\b/, "git commit --amend/history rewrite"],
-			[/\bgit\s+checkout\b[^;&|]*\s+(-f|--force)\b/, "git checkout force"],
-			[/\bgit\s+switch\b[^;&|]*\s+(-f|--force)\b/, "git switch force"],
-			[/\bgit\s+restore\b[^;&|]*\s+(-W|--worktree)\b/, "git restore worktree files"],
-		];
-
-		for (const [pattern, reason] of confirmChecks) {
-			if (pattern.test(normalized)) return { reason, policy: "confirm" };
-		}
-	}
-
-	if (config.mode === "branch" && config.protectDefaultBranchWrites && repo.inRepo && repo.onDefaultBranch && modifiesRepository(normalized)) {
-		return { reason: `repository-modifying command on default branch (${repo.defaultBranch})`, policy: "block" };
-	}
-
-	return null;
-}
-
-function modifiesRepository(command: string): boolean {
-	const writeGitCommands = [
-		/\bgit\s+add\b/,
-		/\bgit\s+commit\b/,
-		/\bgit\s+merge\b/,
-		/\bgit\s+pull\b/,
-		/\bgit\s+cherry-pick\b/,
-		/\bgit\s+revert\b/,
-		/\bgit\s+stash\s+(push|pop|apply|drop|clear)\b/,
-	];
-
-	return writeGitCommands.some((pattern) => pattern.test(command));
 }
