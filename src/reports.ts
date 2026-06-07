@@ -80,6 +80,49 @@ export async function buildCommitReadinessReport(
 		.join("\n");
 }
 
+export async function buildCommitDraftPrompt(
+	pi: ExtensionAPI,
+	repo: Extract<GitSummary, { inRepo: true }>,
+	readiness: string,
+	additionalMessage?: string,
+): Promise<string> {
+	const [nameStatus, diff] = await Promise.all([
+		pi.exec("git", ["diff", "--name-status", "HEAD"]),
+		pi.exec("git", ["diff", "--no-ext-diff", "--unified=80", "HEAD"]),
+	]);
+
+	return [
+		"Prepare commit with pi-git-workflow.",
+		"",
+		"Goal:",
+		"- Review current Git state and draft a safe logical commit plan.",
+		"- If one commit is appropriate, propose exact files to stage and one Conventional Commit message.",
+		"- If changes should be split, propose ordered commits with file groups.",
+		"- Ask user to choose: yes/commit, no/cancel, or provide additional message/revision.",
+		"- Do not mutate GitHub issues or PRs.",
+		"- Do not run destructive Git operations.",
+		"- Before committing, run configured checks if needed and use explicit user confirmation.",
+		"",
+		additionalMessage ? `User additional message:\n${indent(additionalMessage)}` : undefined,
+		additionalMessage ? "" : undefined,
+		readiness,
+		"",
+		repo.statusShort ? `Status:\n${indent(repo.statusShort)}` : "Status: clean",
+		repo.diffStat ? `Diff stat:\n${indent(repo.diffStat)}` : "Diff stat: none",
+		nameStatus.stdout.trim() ? `Changed paths:\n${indent(nameStatus.stdout.trim())}` : "Changed paths: none",
+		"",
+		repo.recentCommits ? `Recent commit style:\n${indent(repo.recentCommits)}` : "Recent commit style: none",
+		"",
+		diff.stdout.trim() ? `Diff (truncated):\n${indent(truncate(diff.stdout.trim(), 12000))}` : "Diff: none",
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+export function isCommitReadinessPassing(report: string): boolean {
+	return !report.includes("FAIL");
+}
+
 export function buildGitWorkflowContext(
 	repo: Extract<GitSummary, { inRepo: true }>,
 	config: GitWorkflowConfig,

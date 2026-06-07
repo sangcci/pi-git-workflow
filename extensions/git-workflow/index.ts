@@ -13,11 +13,13 @@ import {
 	updateTaskLedger,
 } from "../../src/ledger.js";
 import {
+	buildCommitDraftPrompt,
 	buildCommitReadinessReport,
 	buildGitWorkflowContext,
 	buildHistoryReviewReport,
 	formatCheckResults,
 	indent,
+	isCommitReadinessPassing,
 } from "../../src/reports.js";
 import type { GitSummary, GitWorkflowConfig } from "../../src/types.js";
 
@@ -103,7 +105,8 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 			const readiness = await buildCommitReadinessReport(pi, repo, config);
 			await appendCommitPlanToTaskLedger(repo, readiness);
 			handledDirtyFingerprint = fingerprint;
-			ctx.ui.notify(readiness, readiness.includes("FAIL") ? "warning" : "info");
+			ctx.ui.notify(readiness, isCommitReadinessPassing(readiness) ? "info" : "warning");
+			if (isCommitReadinessPassing(readiness)) await offerCommitDraftHandoff(pi, ctx, repo, readiness);
 			return;
 		}
 
@@ -214,7 +217,8 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 
 			const readiness = await buildCommitReadinessReport(pi, repo, config);
 			if (config.taskLedger) await appendCommitPlanToTaskLedger(repo, readiness);
-			ctx.ui.notify(readiness, readiness.includes("FAIL") ? "warning" : "info");
+			ctx.ui.notify(readiness, isCommitReadinessPassing(readiness) ? "info" : "warning");
+			if (isCommitReadinessPassing(readiness)) await offerCommitDraftHandoff(pi, ctx, repo, readiness);
 		},
 	});
 
@@ -319,6 +323,36 @@ export default function gitWorkflowExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(taskLedger.exists ? taskLedger.content : `${TASK_RELATIVE_PATH} does not exist. Run /git-task init <title>.`, "info");
 		},
 	});
+}
+
+async function offerCommitDraftHandoff(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	repo: Extract<GitSummary, { inRepo: true }>,
+	readiness: string,
+): Promise<void> {
+	if (!ctx.hasUI) {
+		pi.sendUserMessage(await buildCommitDraftPrompt(pi, repo, readiness), { deliverAs: "followUp" });
+		return;
+	}
+
+	const choice = await ctx.ui.select("Commit readiness passed. Next?", [
+		"Draft commit with model",
+		"Draft commit with additional message",
+		"Record readiness only",
+		"Cancel",
+	]);
+
+	if (choice === "Draft commit with model") {
+		pi.sendUserMessage(await buildCommitDraftPrompt(pi, repo, readiness), { deliverAs: "followUp" });
+		return;
+	}
+
+	if (choice === "Draft commit with additional message") {
+		const additionalMessage = await ctx.ui.editor("Additional commit guidance", "");
+		if (additionalMessage === undefined) return;
+		pi.sendUserMessage(await buildCommitDraftPrompt(pi, repo, readiness, additionalMessage), { deliverAs: "followUp" });
+	}
 }
 
 async function loadOrCreateConfig(

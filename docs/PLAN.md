@@ -78,7 +78,7 @@ Rules:
 
 - The UI only decides the next workflow step.
 - It must not commit, amend, squash, rebase, push, create issues, close issues, or open PRs by default.
-- `Prepare commit` should run required checks when configured, summarize staging candidates, and hand off to the configured commit skill or adapter.
+- `Prepare commit` should run required checks when configured, summarize staging candidates, and offer a model handoff for a commit plan/message draft when readiness passes.
 - After a commit message draft exists, validate it with commitlint when the project provides commitlint configuration or scripts.
 - `Review history cleanup` is read-only until the user explicitly confirms a rewrite operation.
 - The UI should be throttled so it does not nag after every turn for the same unchanged dirty state.
@@ -381,6 +381,7 @@ Behavior:
 - Infer npm scripts when no checks are configured.
 - Store latest check result in task ledger when enabled.
 - Report commit readiness failures before the user runs commit generation.
+- When readiness passes, offer model handoff with optional additional user guidance.
 
 Success criteria:
 
